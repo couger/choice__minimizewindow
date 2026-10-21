@@ -1,0 +1,17 @@
+bin/
+test-results/
+*.user
+*.log
+*.zip
+.vs/
+obj/
+*.pdb
+*.dmp
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.bundle
+audit-private/

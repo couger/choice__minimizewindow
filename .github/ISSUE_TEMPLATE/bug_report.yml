@@ -1,0 +1,25 @@
+name: 问题反馈
+description: 提交可复现的问题，不上传未脱敏的日志或截图
+body:
+  - type: markdown
+    attributes:
+      value: 实验项目不保证兼容所有软件。请勿填写个人邮箱、令牌、本机用户名、敏感窗口标题或私人文件路径；安全问题按 SECURITY.md 私密报告。
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本及 Windows 版本
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 使用通用应用名称和脱敏数据说明显示器布局、快捷键、权限模式。
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 预期结果与实际结果
+    validations:
+      required: true
