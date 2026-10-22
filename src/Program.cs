@@ -54,6 +54,7 @@ internal sealed class MainForm : Form
     readonly DesktopTarget desktopTarget=new DesktopTarget();
     readonly CurrentScreen currentScreen=new CurrentScreen();
     readonly LaunchRouter launchRouter;
+    readonly LayoutProtection layoutProtection;
     bool routeEnabled=true;
     Label title;
     string hotkey="Ctrl+Alt+D";
@@ -66,6 +67,9 @@ internal sealed class MainForm : Form
     internal MainForm(uint routingOnlyPid=0)
     {
         launchRouter=new LaunchRouter(routingOnlyPid);
+        layoutProtection=new LayoutProtection();
+        bool routingBlocked=false;
+        layoutProtection.Changed+=delegate {bool blocked=layoutProtection.RoutingBlocked;if(blocked!=routingBlocked) {routingBlocked=blocked;ConfigureRouting();}};
         Text=Program.Name; Icon=MakeIcon(); Font=new Font("Microsoft YaHei UI",10);
         AutoScaleMode=AutoScaleMode.Dpi; ClientSize=new Size(720,390); MinimumSize=new Size(600,340);
         StartPosition=FormStartPosition.CenterScreen; FormBorderStyle=FormBorderStyle.Sizable; MaximizeBox=false;
@@ -102,7 +106,7 @@ internal sealed class MainForm : Form
         Resize+=delegate {if(WindowState==FormWindowState.Minimized) Hide();};
         KeyDown+=delegate(object s,KeyEventArgs e) { if(e.KeyCode==Keys.Escape) {Hide(); if(previousFocus!=IntPtr.Zero) Native.SetForegroundWindow(previousFocus); e.Handled=true;} int n=(int)e.KeyCode-(int)Keys.D1; if(n<0 || n>8) n=(int)e.KeyCode-(int)Keys.NumPad1; Screen[] screens=WindowManager.Screens(); if(n>=0 && n<screens.Length) {e.Handled=true; Choose(screens[n]);} };
         timer.Interval=30; timer.Tick+=delegate {if(Program.QuitSignal.WaitOne(0)) {exiting=true;manager.RestoreAll();Close();return;} if(Program.Signal.WaitOne(0)) OpenSelector();}; timer.Start();
-        Shown+=delegate {if(!ConfigureHotkey()) MessageBox.Show("快捷键监听启动失败，请重新运行程序。仍可使用托盘选屏。",Program.Name); RenderMap(); bool trayOk=VerifyTray(); if(trayOk && Array.IndexOf(Environment.GetCommandLineArgs(),"--tray")>=0) Hide();};
+        Shown+=delegate {layoutProtection.SetActive(applicationEnabled);layoutProtection.Start(Handle);if(!ConfigureHotkey()) MessageBox.Show("快捷键监听启动失败，请重新运行程序。仍可使用托盘选屏。",Program.Name); RenderMap(); bool trayOk=VerifyTray(); if(trayOk && Array.IndexOf(Environment.GetCommandLineArgs(),"--tray")>=0) Hide();};
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged+=DisplayChanged;
     }
     static readonly string[] KeysList={"Win+Alt+D","Ctrl+Alt+D","Win+Ctrl+D","Win+D"};
@@ -144,7 +148,12 @@ internal sealed class MainForm : Form
         }catch(Exception e) {Program.Log("Tray verification: "+e.Message);return false;}
     }
     static void AddButton(Control parent,string text,Action action) {var b=new Button {Text=text,AutoSize=true,Height=32,Margin=new Padding(4)}; b.Click+=delegate {action();}; parent.Controls.Add(b);}
-    void DisplayChanged(object sender,EventArgs e) {QueueAction(delegate {if(Visible) RenderMap();});}
+    void DisplayChanged(object sender,EventArgs e) {QueueAction(delegate {layoutProtection.DisplayChanged();if(Visible) RenderMap();});}
+    protected override void WndProc(ref Message m)
+    {
+        if(m.Msg==0x02b1 && layoutProtection!=null && m.LParam.ToInt64()==System.Diagnostics.Process.GetCurrentProcess().SessionId) layoutProtection.Session(m.WParam.ToInt32());
+        base.WndProc(ref m);
+    }
     void Status(string text) {hint.Text=text;}
     void BuildMenu()
     {
@@ -153,6 +162,15 @@ internal sealed class MainForm : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("显示桌面：选择屏幕",null,delegate {OpenSelector();}).Enabled=applicationEnabled;
         var routing=new ToolStripMenuItem("新开／唤出窗口跟随当前屏幕") {Checked=routeEnabled,Enabled=applicationEnabled};routing.Click+=delegate {SetRouting(!routeEnabled);};menu.Items.Add(routing);
+        var layout=new ToolStripMenuItem("远程桌面布局保护");
+        var automatic=new ToolStripMenuItem("自动保存并恢复本地布局") {Checked=layoutProtection.Enabled};
+        automatic.Click+=delegate {try {layoutProtection.SetEnabled(!layoutProtection.Enabled);}catch(Exception e) {MessageBox.Show(e.Message,Program.Name);}};
+        layout.DropDownItems.Add(automatic);
+        layout.DropDownItems.Add(new ToolStripMenuItem(layoutProtection.Status) {Enabled=false});
+        layout.DropDownItems.Add(new ToolStripSeparator());
+        layout.DropDownItems.Add("保存当前布局",null,delegate {try {layoutProtection.SaveNow();}catch(Exception e) {MessageBox.Show(e.Message,Program.Name);}}).Enabled=layoutProtection.CanSave;
+        layout.DropDownItems.Add("立即恢复布局",null,delegate {try {layoutProtection.RestoreNow();}catch(Exception e) {MessageBox.Show(e.Message,Program.Name);}}).Enabled=layoutProtection.CanRestore;
+        menu.Items.Add(layout);
         menu.Items.Add("切换应用：选择屏幕",null,delegate {OpenSelector(true,false);}).Enabled=applicationEnabled;
         Screen[] screens=WindowManager.Screens();
         for(int i=0;i<screens.Length;i++) {Screen s=screens[i]; menu.Items.Add((i+1)+" 号屏："+manager.ActionText(s),null,delegate {Choose(s);}).Enabled=applicationEnabled;}
@@ -192,9 +210,10 @@ internal sealed class MainForm : Form
     internal void SetApplicationEnabled(bool value)
     {
         bool previous=applicationEnabled; applicationEnabled=value;
-        if(!ConfigureHotkey()) {applicationEnabled=previous; ConfigureHotkey(); MessageBox.Show("启用失败，无法启动快捷键监听，请重新运行程序。",Program.Name); return;}
+        layoutProtection.SetActive(value);
+        if(!ConfigureHotkey()) {applicationEnabled=previous;layoutProtection.SetActive(previous); ConfigureHotkey(); MessageBox.Show("启用失败，无法启动快捷键监听，请重新运行程序。",Program.Name); return;}
         try {Directory.CreateDirectory(Program.DataDir); File.WriteAllText(Path.Combine(Program.DataDir,"enabled.txt"),value.ToString());}
-        catch(Exception e) {applicationEnabled=previous; ConfigureHotkey(); MessageBox.Show("无法保存启用状态："+e.Message,Program.Name); return;}
+        catch(Exception e) {applicationEnabled=previous;layoutProtection.SetActive(previous); ConfigureHotkey(); MessageBox.Show("无法保存启用状态："+e.Message,Program.Name); return;}
         if(!applicationEnabled) {manager.RestoreAll(); Hide();}
         tray.Text=Program.Name+(applicationEnabled?"":"（已停用）"); RenderMap(); Program.Log("Application enabled="+applicationEnabled);
     }
@@ -203,11 +222,12 @@ internal sealed class MainForm : Form
     {
         bool previous=routeEnabled;routeEnabled=enabled;
         try {
-            if(!launchRouter.Configure(routeEnabled && applicationEnabled && !paused)) throw new InvalidOperationException("窗口跟随监听启动失败。");
+            if(!ConfigureRouting()) throw new InvalidOperationException("窗口跟随监听启动失败。");
             Directory.CreateDirectory(Program.DataDir);File.WriteAllText(Path.Combine(Program.DataDir,"routing.txt"),routeEnabled.ToString());
             return true;
-        }catch(Exception e) {routeEnabled=previous;launchRouter.Configure(routeEnabled && applicationEnabled && !paused);MessageBox.Show(e.Message,Program.Name);return false;}
+        }catch(Exception e) {routeEnabled=previous;ConfigureRouting();MessageBox.Show(e.Message,Program.Name);return false;}
     }
+    bool ConfigureRouting() {return launchRouter.Configure(routeEnabled && applicationEnabled && !paused && !layoutProtection.RoutingBlocked);}
     void ChooseDesktop(Screen screen) {if(!applicationEnabled) return;currentScreen.Select(screen.DeviceName);desktopTarget.Remember(screen.DeviceName);Hide();Program.Log("Desktop screen="+screen.DeviceName+" "+manager.Toggle(screen));}
     void Choose(Screen screen) {if(!applicationEnabled) return;if(!switchMode) ChooseDesktop(screen);else {SelectCurrentScreen(screen);Hide();WindowSwitcher.ShowPicker(screen,previousFocus);}}
     void OpenSelector() {OpenSelector(false,false);}
@@ -239,12 +259,12 @@ internal sealed class MainForm : Form
     {
         desktopTarget.Reset();currentScreen.Reset();
         bool ok=shortcuts.Configure(hotkey,switchHotkey,holdMilliseconds,applicationEnabled && !paused);
-        if(!launchRouter.Configure(ok && routeEnabled && applicationEnabled && !paused)) Program.Log("Launch route listener failed");
+        if(!ok) launchRouter.Configure(false);else if(!ConfigureRouting()) Program.Log("Launch route listener failed");
         return ok;
     }
     protected override void Dispose(bool disposing)
     {
-        if(disposing && !resourcesDisposed) {resourcesDisposed=true; shortcuts.Dispose();launchRouter.Dispose(); if(focusRequest!=null) focusRequest.Dispose(); Microsoft.Win32.SystemEvents.DisplaySettingsChanged-=DisplayChanged; manager.RestoreAll(); timer.Dispose(); if(IsHandleCreated) Native.UnregisterHotKey(Handle,1); tray.Visible=false;tray.Dispose();menu.Dispose();}
+        if(disposing && !resourcesDisposed) {resourcesDisposed=true;layoutProtection.Dispose(); shortcuts.Dispose();launchRouter.Dispose(); if(focusRequest!=null) focusRequest.Dispose(); Microsoft.Win32.SystemEvents.DisplaySettingsChanged-=DisplayChanged; manager.RestoreAll(); timer.Dispose(); if(IsHandleCreated) Native.UnregisterHotKey(Handle,1); tray.Visible=false;tray.Dispose();menu.Dispose();}
         base.Dispose(disposing);
     }
 }

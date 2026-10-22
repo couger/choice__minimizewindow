@@ -16,7 +16,7 @@ internal static class SelfTest
     {
         string folder=Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"..","test-results"));Directory.CreateDirectory(folder);
         try {
-            InteractionTests.Run(Check);MenuMaskTests.Run(Check,false);
+            InteractionTests.Run(Check);MenuMaskTests.Run(Check,false);LayoutProtectionTests.Logic(Check);
             Rectangle[] screens={new Rectangle(-1920,0,1920,1080),new Rectangle(0,0,2560,1440),new Rectangle(2560,0,1920,1080)};
             Check(WindowManager.BestScreen(new Rectangle(-900,100,1000,600),screens)==0,"negative coordinates use greatest intersection");
             Check(WindowManager.BestScreen(new Rectangle(2400,100,800,600),screens)==2,"cross-monitor window uses greatest intersection");
@@ -59,6 +59,7 @@ internal static class SelfTest
             Screen[] screens=WindowManager.Screens(); results.Add("MONITORS "+screens.Length);
             CurrentScreenTests.Run(handles[0],Check);
             LaunchRouterTests.Run(handles[0],max,Pump,Check);
+            LayoutProtectionTests.Logic(Check);var layout=LayoutProtectionTests.Live((uint)child.Id,Pump,Check);
             foreach(Screen s in screens) {var entries=WindowSwitcher.Windows(s,(uint)child.Id);Check(entries.Count>0,"window picker finds fixture windows on "+s.DeviceName);foreach(var entry in entries) Check(Screen.FromHandle(entry.Handle).DeviceName==s.DeviceName,"window picker isolates monitor");}
             var switcher=new WindowSwitcher();var seen=new HashSet<IntPtr>();IntPtr current=handles[0];
             int windowCount=WindowSwitcher.Windows(screens[0],(uint)child.Id).Count;
@@ -88,6 +89,7 @@ internal static class SelfTest
             ExternalRestoreTests.Run((uint)child.Id,max,min,Pump,Check);
             // Closed windows must never cause handle errors during restore.
             manager.Toggle(screens[0],(uint)child.Id); Pump(); child.Kill();child.WaitForExit();manager.RestoreAll();
+            Check(layout.Restore((uint)child.Id)==0,"layout skips all closed fixture windows");
             Check(manager.Pending==0,"closed windows ignored safely");
             results.Add("ALL PASSED");
         } catch(Exception e) {results.Add("ERROR "+e); Environment.ExitCode=1;}

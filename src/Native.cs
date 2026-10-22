@@ -4,6 +4,16 @@ using System.Text;
 
 internal static class Native
 {
+    [DllImport("wtsapi32.dll",SetLastError=true)] internal static extern bool WTSRegisterSessionNotification(IntPtr window,uint flags);
+    [DllImport("wtsapi32.dll")] internal static extern bool WTSUnRegisterSessionNotification(IntPtr window);
+    [DllImport("wtsapi32.dll")] internal static extern bool WTSQuerySessionInformation(IntPtr server,int session,int info,out IntPtr buffer,out int bytes);
+    [DllImport("wtsapi32.dll")] internal static extern void WTSFreeMemory(IntPtr buffer);
+    [DllImport("kernel32.dll")] internal static extern uint WTSGetActiveConsoleSessionId();
+    [DllImport("user32.dll")] internal static extern IntPtr OpenInputDesktop(uint flags,bool inherit,uint access);
+    [DllImport("user32.dll")] internal static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] internal static extern bool GetUserObjectInformation(IntPtr handle,int index,StringBuilder value,int bytes,out int needed);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] internal static extern bool SetProp(IntPtr window,string name,IntPtr value);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] internal static extern IntPtr GetProp(IntPtr window,string name);
     internal delegate bool EnumProc(IntPtr h, IntPtr p);
     internal delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
     internal delegate void WinEventProc(IntPtr hook,uint type,IntPtr window,int objectId,int childId,uint thread,uint time);
