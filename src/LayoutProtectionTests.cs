@@ -41,6 +41,7 @@ internal static class LayoutProtectionTests
     internal static LayoutSnapshot Live(uint fixturePid,Action pump,Action<bool,string> check)
     {
         if(fixturePid==0) throw new ArgumentException("Fixture PID is mandatory");
+        check(LayoutProtection.DesktopReady(),"interactive local desktop is available before restoring windows");
         string encrypted=Path.Combine(Program.DataDir,"encrypted-layout-test");Directory.CreateDirectory(encrypted);
         bool efs=false;
         try {File.Encrypt(encrypted);efs=(File.GetAttributes(encrypted)&FileAttributes.Encrypted)!=0;}

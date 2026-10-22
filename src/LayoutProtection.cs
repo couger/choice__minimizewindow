@@ -156,12 +156,19 @@ internal sealed class LayoutProtection : IDisposable
         if(!Native.WTSQuerySessionInformation(IntPtr.Zero,-1,16,out buffer,out bytes)) return false;
         try {if(bytes<2 || Marshal.ReadInt16(buffer)!=0) return false;}finally {Native.WTSFreeMemory(buffer);}
         if(!Native.WTSQuerySessionInformation(IntPtr.Zero,-1,8,out buffer,out bytes)) return false;
-        try {return bytes>=4 && Marshal.ReadInt32(buffer)==0;}finally {Native.WTSFreeMemory(buffer);}
+        bool connected;try {connected=bytes>=4 && Marshal.ReadInt32(buffer)==0;}finally {Native.WTSFreeMemory(buffer);}
+        return connected && DesktopReady();
+    }
+    internal static bool DesktopReady()
+    {
+        IntPtr desktop=Native.OpenInputDesktop(0,false,1);if(desktop==IntPtr.Zero) return false;
+        try {var name=new System.Text.StringBuilder(256);int needed;return Native.GetUserObjectInformation(desktop,2,name,name.Capacity*2,out needed) && string.Equals(name.ToString(),"Default",StringComparison.OrdinalIgnoreCase);}
+        finally {Native.CloseDesktop(desktop);}
     }
     internal void Session(int reason)
     {
         if(reason==7) locked=true;
-        if(reason==8 || reason==1) locked=false;
+        if(reason==8) locked=false;
         if(reason==2 || reason==3 || reason==4) gate.Freeze(snapshot!=null);
         else gate.Freeze(false);
         candidate=null;Poll();
