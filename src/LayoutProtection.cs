@@ -13,6 +13,7 @@ internal sealed class LayoutSnapshot
     const string Property="ChoiceMinimizeWindow.LayoutIdentity.v1";
     internal string Topology;
     internal DateTime Saved;
+    internal long Generation;
     internal readonly List<Entry> Windows=new List<Entry>();
     internal static string CurrentTopology()
     {
@@ -59,29 +60,25 @@ internal sealed class LayoutSnapshot
     }
     internal void Write(string path)
     {
-        string temporary=path+".tmp";
-        try {
-            using(var stream=new FileStream(temporary,FileMode.Create,FileAccess.Write,FileShare.None))
+            // Production alternates two independent files. A failed write never replaces
+            // the preceding complete generation, and requires no rename/metadata merge.
+            using(var stream=new FileStream(path,FileMode.Create,FileAccess.Write,FileShare.None))
             using(var writer=new BinaryWriter(stream)) {
-                writer.Write("ChoiceLayout1");writer.Write(Topology);writer.Write(Saved.Ticks);writer.Write(Windows.Count);
+                writer.Write("ChoiceLayout2");writer.Write(Topology);writer.Write(Saved.Ticks);writer.Write(Generation);writer.Write(Windows.Count);
                 foreach(var e in Windows) {
                     writer.Write(e.Handle);writer.Write(e.Pid);writer.Write(e.Started);writer.Write(e.Cookie);
                     var p=e.Placement;foreach(int n in new[]{p.Flags,p.Show,p.Min.X,p.Min.Y,p.Max.X,p.Max.Y,p.Normal.Left,p.Normal.Top,p.Normal.Right,p.Normal.Bottom}) writer.Write(n);
                 }
-                writer.Flush();stream.Flush(true);
+                writer.Write("EndChoiceLayout2");writer.Flush();stream.Flush(true);
             }
-            // ReplaceFile merges the old file's EFS metadata and can fail in an encrypted
-            // profile. Rename the flushed sibling instead; it inherits the same directory's
-            // encryption and permissions without changing any security settings.
-            if(!Native.MoveFileEx(temporary,path,0x1|0x8)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        }finally {if(File.Exists(temporary)) File.Delete(temporary);}
     }
     internal static LayoutSnapshot Read(string path)
     {
         if(new FileInfo(path).Length>1024*1024) throw new InvalidDataException("Layout file too large");
         using(var reader=new BinaryReader(File.OpenRead(path))) {
-            if(reader.ReadString()!="ChoiceLayout1") throw new InvalidDataException("Unknown layout format");
+            string format=reader.ReadString();if(format!="ChoiceLayout1" && format!="ChoiceLayout2") throw new InvalidDataException("Unknown layout format");
             var snapshot=new LayoutSnapshot {Topology=reader.ReadString(),Saved=new DateTime(reader.ReadInt64())};
+            if(format=="ChoiceLayout2") {snapshot.Generation=reader.ReadInt64();if(snapshot.Generation<0) throw new InvalidDataException("Invalid generation");}
             int count=reader.ReadInt32();if(count<0 || count>10000 || snapshot.Topology.Length>4096) throw new InvalidDataException("Invalid layout");
             for(int i=0;i<count;i++) {
                 var e=new Entry {Handle=reader.ReadInt64(),Pid=reader.ReadUInt32(),Started=reader.ReadInt64(),Cookie=reader.ReadInt64()};
@@ -89,9 +86,20 @@ internal sealed class LayoutSnapshot
                 if(e.Placement.Show!=1 && e.Placement.Show!=2 && e.Placement.Show!=3) throw new InvalidDataException("Invalid window state");
                 snapshot.Windows.Add(e);
             }
+            if(format=="ChoiceLayout2" && reader.ReadString()!="EndChoiceLayout2") throw new InvalidDataException("Incomplete layout");
             if(reader.BaseStream.Position!=reader.BaseStream.Length) throw new InvalidDataException("Trailing layout data");
             return snapshot;
         }
+    }
+    internal static LayoutSnapshot LoadLatest(string directory)
+    {
+        LayoutSnapshot latest=null;
+        foreach(string name in new[]{"layout.dat","layout-a.dat","layout-b.dat"}) {
+            string path=Path.Combine(directory,name);if(!File.Exists(path)) continue;
+            try {var value=Read(path);if(latest==null || value.Generation>latest.Generation || (value.Generation==latest.Generation && value.Saved>latest.Saved)) latest=value;}
+            catch(Exception e) {Program.Log("Layout load: "+e.Message);}
+        }
+        return latest;
     }
 }
 
@@ -120,7 +128,7 @@ internal sealed class LayoutGate
 internal sealed class LayoutProtection : IDisposable
 {
     readonly Timer timer=new Timer {Interval=1000};readonly Stopwatch clock=Stopwatch.StartNew();
-    readonly LayoutGate gate=new LayoutGate();readonly string path=Path.Combine(Program.DataDir,"layout.dat");
+    readonly LayoutGate gate=new LayoutGate();
     readonly string setting=Path.Combine(Program.DataDir,"layout-enabled.txt");
     LayoutSnapshot snapshot,candidate;long candidateSince,lastCapture;bool locked,disposed,started,active=true,registered;IntPtr owner;
     internal bool Enabled {get;private set;}
@@ -132,7 +140,7 @@ internal sealed class LayoutProtection : IDisposable
     internal LayoutProtection()
     {
         Enabled=true;Status="等待本地屏幕稳定";
-        try {bool value;if(File.Exists(setting) && bool.TryParse(File.ReadAllText(setting),out value)) Enabled=value;if(File.Exists(path)) snapshot=LayoutSnapshot.Read(path);}
+        try {bool value;if(File.Exists(setting) && bool.TryParse(File.ReadAllText(setting),out value)) Enabled=value; snapshot=LayoutSnapshot.LoadLatest(Program.DataDir);}
         catch(Exception e) {Program.Log("Layout load: "+e.Message);}
         timer.Tick+=delegate {Poll();};
     }
@@ -168,7 +176,11 @@ internal sealed class LayoutProtection : IDisposable
     {
         Status=value;var changed=Changed;if(changed!=null) changed();
     }
-    void SaveSnapshot(LayoutSnapshot value) {Directory.CreateDirectory(Program.DataDir);value.Write(path);snapshot=value;}
+    void SaveSnapshot(LayoutSnapshot value)
+    {
+        Directory.CreateDirectory(Program.DataDir);value.Generation=checked((snapshot==null?0:snapshot.Generation)+1);
+        value.Write(Path.Combine(Program.DataDir,value.Generation%2==1?"layout-a.dat":"layout-b.dat"));snapshot=value;
+    }
     internal void SaveNow()
     {
         if(!CanSave) throw new InvalidOperationException("请回到本机并等待屏幕稳定后再保存。");

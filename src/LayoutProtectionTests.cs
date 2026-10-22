@@ -28,9 +28,15 @@ internal static class LayoutProtectionTests
         sample.Write(path);var read=LayoutSnapshot.Read(path);
         check(read.Topology==sample.Topology && read.Saved==sample.Saved && read.Windows.Count==1,"layout file round-trips metadata");
         check(read.Windows[0].Cookie==111 && read.Windows[0].Placement.Normal.Left==-300 && read.Windows[0].Placement.Show==3,"layout file preserves identity, negative coordinates and state");
-        sample.Write(path);check(LayoutSnapshot.Read(path).Windows.Count==1,"atomic snapshot replacement remains readable");
+        sample.Write(path);check(LayoutSnapshot.Read(path).Windows.Count==1,"snapshot rewrite remains readable");
         File.WriteAllText(path,"corrupt");bool rejected=false;try {LayoutSnapshot.Read(path);}catch(Exception) {rejected=true;}
         check(rejected,"corrupt layout file rejected safely");File.Delete(path);
+        string recovery=Path.Combine(Program.DataDir,"layout-recovery-test");Directory.CreateDirectory(recovery);
+        sample.Generation=1;sample.Write(Path.Combine(recovery,"layout-a.dat"));sample.Generation=2;sample.Write(Path.Combine(recovery,"layout-b.dat"));
+        check(LayoutSnapshot.LoadLatest(recovery).Generation==2,"layout recovery loads newest complete generation");
+        using(var truncated=File.OpenWrite(Path.Combine(recovery,"layout-b.dat"))) truncated.SetLength(40);
+        check(LayoutSnapshot.LoadLatest(recovery).Generation==1,"interrupted snapshot falls back to previous complete generation");
+        File.Delete(Path.Combine(recovery,"layout-a.dat"));File.Delete(Path.Combine(recovery,"layout-b.dat"));Directory.Delete(recovery);
     }
     internal static LayoutSnapshot Live(uint fixturePid,Action pump,Action<bool,string> check)
     {
@@ -42,7 +48,7 @@ internal static class LayoutProtectionTests
         if(efs) {
             string encryptedPath=Path.Combine(encrypted,"layout.dat");var sample=new LayoutSnapshot {Topology="test",Saved=DateTime.Now};
             sample.Write(encryptedPath);sample.Write(encryptedPath);
-            check(LayoutSnapshot.Read(encryptedPath).Topology=="test","atomic snapshot replacement works in an EFS-encrypted directory");
+            check(LayoutSnapshot.Read(encryptedPath).Topology=="test","snapshot rewrites work in an EFS-encrypted directory");
             check((File.GetAttributes(encryptedPath)&FileAttributes.Encrypted)!=0,"snapshot updates preserve inherited EFS encryption");
             File.Delete(encryptedPath);
         }
