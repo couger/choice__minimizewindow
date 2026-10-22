@@ -23,6 +23,10 @@ internal static class TrayMenuTests
             check(menu.Visible && menu.Items.Count>0,"empty tray menu can be rebuilt and displayed in one click");
             menu.Close();
             check(menu.Items[0].Text=="启用","tray enable option remains available");
+            ToolStripMenuItem layout=null;foreach(ToolStripItem item in menu.Items) if(item.Text=="远程桌面布局保护") layout=(ToolStripMenuItem)item;
+            check(layout!=null && layout.DropDownItems.Count==5,"layout protection submenu exposes toggle, status, save and restore");
+            check(((ToolStripMenuItem)layout.DropDownItems[0]).Checked,"layout auto protection enabled by default in isolated test profile");
+            check(!layout.DropDownItems[3].Enabled && !layout.DropDownItems[4].Enabled,"layout actions unavailable until local screens stabilize");
         }
     }
 }
