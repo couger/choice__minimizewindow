@@ -9,6 +9,7 @@ internal static class Native
     [DllImport("wtsapi32.dll")] internal static extern bool WTSQuerySessionInformation(IntPtr server,int session,int info,out IntPtr buffer,out int bytes);
     [DllImport("wtsapi32.dll")] internal static extern void WTSFreeMemory(IntPtr buffer);
     [DllImport("kernel32.dll")] internal static extern uint WTSGetActiveConsoleSessionId();
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] internal static extern bool MoveFileEx(string existing,string destination,uint flags);
     [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)] internal static extern bool SetProp(IntPtr window,string name,IntPtr value);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] internal static extern IntPtr GetProp(IntPtr window,string name);
     internal delegate bool EnumProc(IntPtr h, IntPtr p);

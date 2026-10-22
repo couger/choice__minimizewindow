@@ -70,7 +70,10 @@ internal sealed class LayoutSnapshot
                 }
                 writer.Flush();stream.Flush(true);
             }
-            if(File.Exists(path)) File.Replace(temporary,path,null);else File.Move(temporary,path);
+            // ReplaceFile merges the old file's EFS metadata and can fail in an encrypted
+            // profile. Rename the flushed sibling instead; it inherits the same directory's
+            // encryption and permissions without changing any security settings.
+            if(!Native.MoveFileEx(temporary,path,0x1|0x8)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         }finally {if(File.Exists(temporary)) File.Delete(temporary);}
     }
     internal static LayoutSnapshot Read(string path)

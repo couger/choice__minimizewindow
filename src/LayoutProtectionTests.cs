@@ -35,6 +35,18 @@ internal static class LayoutProtectionTests
     internal static LayoutSnapshot Live(uint fixturePid,Action pump,Action<bool,string> check)
     {
         if(fixturePid==0) throw new ArgumentException("Fixture PID is mandatory");
+        string encrypted=Path.Combine(Program.DataDir,"encrypted-layout-test");Directory.CreateDirectory(encrypted);
+        bool efs=false;
+        try {File.Encrypt(encrypted);efs=(File.GetAttributes(encrypted)&FileAttributes.Encrypted)!=0;}
+        catch(System.ComponentModel.Win32Exception) {}catch(IOException) {}catch(UnauthorizedAccessException) {}
+        if(efs) {
+            string encryptedPath=Path.Combine(encrypted,"layout.dat");var sample=new LayoutSnapshot {Topology="test",Saved=DateTime.Now};
+            sample.Write(encryptedPath);sample.Write(encryptedPath);
+            check(LayoutSnapshot.Read(encryptedPath).Topology=="test","atomic snapshot replacement works in an EFS-encrypted directory");
+            check((File.GetAttributes(encryptedPath)&FileAttributes.Encrypted)!=0,"snapshot updates preserve inherited EFS encryption");
+            File.Delete(encryptedPath);
+        }
+        Directory.Delete(encrypted);
         var snapshot=LayoutSnapshot.Capture(fixturePid);
         check(snapshot.Windows.Count>=3,"layout snapshot finds only fixture windows");
         foreach(var e in snapshot.Windows) {
