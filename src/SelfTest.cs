@@ -38,16 +38,17 @@ internal static class SelfTest
         min.Show(); min.WindowState=FormWindowState.Minimized; forms.Add(min); lines.Add("min,0,"+min.Handle.ToInt64());
         File.WriteAllLines(path,lines.ToArray()); Application.Run(new ApplicationContext());
     }
-    internal static void Run()
+    internal static void Run(bool layoutOnly=false)
     {
         string folder=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"..","test-results"); Directory.CreateDirectory(folder);
         string fixture=Path.Combine(folder,"fixture.txt"); if(File.Exists(fixture)) File.Delete(fixture);
         Process child=null; var manager=new WindowManager();
         try {
-            TrayMenuTests.Run(Check);
+            if(!layoutOnly) {TrayMenuTests.Run(Check);
             InteractionTests.Run(Check);
             MenuMaskTests.Run(Check);
             ListenerTests.Run(Check);
+            }
             Rectangle[] bounds={new Rectangle(-1920,0,1920,1080),new Rectangle(0,0,2560,1440),new Rectangle(2560,0,1920,1080)};
             Check(WindowManager.BestScreen(new Rectangle(-900,100,1000,600),bounds)==0,"negative coordinate / greatest area");
             Check(WindowManager.BestScreen(new Rectangle(2400,100,800,600),bounds)==2,"cross-monitor greatest area");
@@ -57,9 +58,11 @@ internal static class SelfTest
             var handles=new List<IntPtr>(); var monitor=new List<int>(); IntPtr max=IntPtr.Zero,min=IntPtr.Zero;
             foreach(string line in File.ReadAllLines(fixture)) {string[] p=line.Split(','); IntPtr h=new IntPtr(long.Parse(p[2])); if(p[0]=="normal"){handles.Add(h);monitor.Add(int.Parse(p[1]));} else if(p[0]=="max") max=h; else min=h;}
             Screen[] screens=WindowManager.Screens(); results.Add("MONITORS "+screens.Length);
+            if(layoutOnly) {LayoutProtectionTests.Logic(Check);LayoutProtectionTests.Live((uint)child.Id,Pump,Check);LayoutProtectionTests.Service((uint)child.Id,Pump,Check);results.Add("ALL PASSED");return;}
             CurrentScreenTests.Run(handles[0],Check);
             LaunchRouterTests.Run(handles[0],max,Pump,Check);
             LayoutProtectionTests.Logic(Check);var layout=LayoutProtectionTests.Live((uint)child.Id,Pump,Check);
+            LayoutProtectionTests.Service((uint)child.Id,Pump,Check);
             foreach(Screen s in screens) {var entries=WindowSwitcher.Windows(s,(uint)child.Id);Check(entries.Count>0,"window picker finds fixture windows on "+s.DeviceName);foreach(var entry in entries) Check(Screen.FromHandle(entry.Handle).DeviceName==s.DeviceName,"window picker isolates monitor");}
             var switcher=new WindowSwitcher();var seen=new HashSet<IntPtr>();IntPtr current=handles[0];
             int windowCount=WindowSwitcher.Windows(screens[0],(uint)child.Id).Count;
@@ -93,6 +96,6 @@ internal static class SelfTest
             Check(manager.Pending==0,"closed windows ignored safely");
             results.Add("ALL PASSED");
         } catch(Exception e) {results.Add("ERROR "+e); Environment.ExitCode=1;}
-        finally {manager.RestoreAll(); if(child!=null){if(!child.HasExited) child.Kill();child.Dispose();} File.WriteAllLines(Path.Combine(folder,"self-test.txt"),results.ToArray());}
+        finally {manager.RestoreAll(); if(child!=null){if(!child.HasExited) child.Kill();child.Dispose();} File.WriteAllLines(Path.Combine(folder,layoutOnly?"layout-test.txt":"self-test.txt"),results.ToArray());}
     }
 }

@@ -11,6 +11,9 @@ internal sealed class LayoutSnapshot
 {
     internal sealed class Entry {internal long Handle,Started,Cookie;internal uint Pid;internal Native.Placement Placement;}
     const string Property="ChoiceMinimizeWindow.LayoutIdentity.v1";
+    static int restoreEpoch;static long restoreStarted;
+    internal static void CancelRestore() {restoreEpoch++;}
+    internal static void CancelRestore(long interactionTime) {if(interactionTime>restoreStarted) CancelRestore();}
     internal string Topology;
     internal DateTime Saved;
     internal long Generation;
@@ -44,7 +47,8 @@ internal sealed class LayoutSnapshot
     internal int Restore(uint onlyPid=0)
     {
         if(Topology!=CurrentTopology()) return -1;
-        int count=0;
+        int epoch=++restoreEpoch;restoreStarted=Stopwatch.GetTimestamp();
+        int count=0;var targets=new List<Entry>();
         foreach(var entry in Windows) {
             if(onlyPid!=0 && entry.Pid!=onlyPid) continue;
             IntPtr h=new IntPtr(entry.Handle);uint pid;Native.GetWindowThreadProcessId(h,out pid);
@@ -54,9 +58,40 @@ internal sealed class LayoutSnapshot
             var p=entry.Placement;p.Length=Marshal.SizeOf(typeof(Native.Placement));
             // Async placement avoids waiting on an unresponsive foreign application's UI thread.
             p.Flags|=4;
-            if(Native.SetWindowPlacement(h,ref p)) count++;
+            if(Native.SetWindowPlacement(h,ref p)) {count++;targets.Add(entry);}
         }
+        if(targets.Count>0) new PlacementRepair(targets,epoch).Start();
         return count;
+    }
+    sealed class PlacementRepair
+    {
+        readonly List<Entry> targets;readonly int epoch;readonly Timer timer=new Timer {Interval=200};int attempts,stable;
+        internal PlacementRepair(List<Entry> targets,int epoch) {this.targets=targets;this.epoch=epoch;timer.Tick+=delegate {Tick();};}
+        internal void Start() {timer.Start();}
+        void Tick()
+        {
+            if(epoch!=restoreEpoch) {timer.Dispose();return;}
+            bool matched=true;int mismatches=0;
+            foreach(var entry in targets) {
+                IntPtr h=new IntPtr(entry.Handle);uint pid;Native.GetWindowThreadProcessId(h,out pid);
+                if(pid!=entry.Pid || !WindowManager.Eligible(h,true) || Native.GetProp(h,Property).ToInt64()!=entry.Cookie) continue;
+                var current=new Native.Placement {Length=Marshal.SizeOf(typeof(Native.Placement))};
+                if(!Native.GetWindowPlacement(h,ref current)) continue;
+                var a=entry.Placement.Normal;var b=current.Normal;
+                if(current.Show==entry.Placement.Show && Math.Abs(a.Left-b.Left)<=2 && Math.Abs(a.Top-b.Top)<=2 && Math.Abs(a.Right-b.Right)<=2 && Math.Abs(a.Bottom-b.Bottom)<=2) continue;
+                matched=false;mismatches++;
+                var expected=entry.Placement;expected.Length=Marshal.SizeOf(typeof(Native.Placement));expected.Flags|=4;
+                Native.SetWindowPlacement(h,ref expected);
+                if(expected.Show==1 && !Native.IsIconic(h) && !Native.IsZoomed(h)) {
+                    var rect=System.Drawing.Rectangle.FromLTRB(a.Left,a.Top,a.Right,a.Bottom);var screens=WindowManager.Screens();
+                    var screen=screens[WindowManager.BestScreen(rect,Array.ConvertAll(screens,s=>s.Bounds))];
+                    rect.Offset(screen.WorkingArea.Left-screen.Bounds.Left,screen.WorkingArea.Top-screen.Bounds.Top);
+                    Native.SetWindowPos(h,IntPtr.Zero,rect.Left,rect.Top,rect.Width,rect.Height,0x4014);
+                }
+            }
+            attempts++;stable=matched?stable+1:0;
+            if(stable>=2 || attempts>=8) {if(!matched) Program.Log("Layout repair incomplete windows="+mismatches);timer.Dispose();}
+        }
     }
     internal void Write(string path)
     {
@@ -91,10 +126,10 @@ internal sealed class LayoutSnapshot
             return snapshot;
         }
     }
-    internal static LayoutSnapshot LoadLatest(string directory)
+    internal static LayoutSnapshot LoadLatest(string directory,string prefix="layout")
     {
         LayoutSnapshot latest=null;
-        foreach(string name in new[]{"layout.dat","layout-a.dat","layout-b.dat"}) {
+        foreach(string name in new[]{prefix+".dat",prefix+"-a.dat",prefix+"-b.dat"}) {
             string path=Path.Combine(directory,name);if(!File.Exists(path)) continue;
             try {var value=Read(path);if(latest==null || value.Generation>latest.Generation || (value.Generation==latest.Generation && value.Saved>latest.Saved)) latest=value;}
             catch(Exception e) {Program.Log("Layout load: "+e.Message);}
@@ -129,29 +164,37 @@ internal sealed class LayoutProtection : IDisposable
 {
     readonly Timer timer=new Timer {Interval=1000};readonly Stopwatch clock=Stopwatch.StartNew();
     readonly LayoutGate gate=new LayoutGate();
-    readonly string setting=Path.Combine(Program.DataDir,"layout-enabled.txt");
-    LayoutSnapshot snapshot,candidate;long candidateSince,lastCapture;bool locked,disposed,started,active=true,registered;IntPtr owner;
+    readonly string setting,dataDirectory;readonly uint onlyPid;readonly Func<bool> localCheck;readonly Func<long> milliseconds;
+    long Now {get {return milliseconds==null?clock.ElapsedMilliseconds:milliseconds();}}
+    LayoutSnapshot snapshot,manualSnapshot,candidate;long candidateSince,lastCapture;bool disposed,started,active=true,registered;IntPtr owner;
     internal bool Enabled {get;private set;}
     internal bool RoutingBlocked {get {return started && active && Enabled && gate.Blocked;}}
     internal bool CanSave {get {return started && Local() && gate.Stable;}}
-    internal bool CanRestore {get {return CanSave && snapshot!=null && snapshot.Topology==LayoutSnapshot.CurrentTopology();}}
+    internal bool CanRestore {get {return CanSave && manualSnapshot!=null && manualSnapshot.Topology==LayoutSnapshot.CurrentTopology();}}
+    internal bool CanRestoreAutomatic {get {return CanSave && snapshot!=null && snapshot.Topology==LayoutSnapshot.CurrentTopology();}}
+    internal string ManualStatus {get {return manualSnapshot==null?"手动布局：尚未保存":"手动布局："+manualSnapshot.Saved.ToString("MM-dd HH:mm:ss")+" · "+manualSnapshot.Windows.Count+" 个窗口";}}
     internal string Status {get;private set;}
     internal event Action Changed;
-    internal LayoutProtection()
+    internal LayoutProtection(uint onlyPid=0,string directory=null,Func<bool> localCheck=null,Func<long> milliseconds=null)
     {
+        if((directory!=null || localCheck!=null || milliseconds!=null) && onlyPid==0) throw new ArgumentException("Test overrides require a fixture PID");
+        this.onlyPid=onlyPid;this.localCheck=localCheck;this.milliseconds=milliseconds;dataDirectory=directory??Program.DataDir;setting=Path.Combine(dataDirectory,"layout-enabled.txt");
         Enabled=true;Status="等待本地屏幕稳定";
-        try {bool value;if(File.Exists(setting) && bool.TryParse(File.ReadAllText(setting),out value)) Enabled=value; snapshot=LayoutSnapshot.LoadLatest(Program.DataDir);}
+        try {bool value;if(File.Exists(setting) && bool.TryParse(File.ReadAllText(setting),out value)) Enabled=value; snapshot=LayoutSnapshot.LoadLatest(dataDirectory);manualSnapshot=LayoutSnapshot.LoadLatest(dataDirectory,"layout-manual");}
         catch(Exception e) {Program.Log("Layout load: "+e.Message);}
         timer.Tick+=delegate {Poll();};
     }
     internal void Start(IntPtr handle)
     {
         owner=handle;registered=Native.WTSRegisterSessionNotification(owner,0);started=true;
-        Program.Log("Layout protection started; session notifications="+registered);Poll();timer.Start();
+        Program.Log("Layout protection started; session notifications="+registered+" automaticWindows="+(snapshot==null?0:snapshot.Windows.Count)+" manualWindows="+(manualSnapshot==null?0:manualSnapshot.Windows.Count));Poll();timer.Start();
     }
     bool Local()
     {
-        if(locked || Native.WTSGetActiveConsoleSessionId()!=(uint)Process.GetCurrentProcess().SessionId) return false;
+        if(localCheck!=null) return localCheck();
+        // Poll the current desktop instead of latching a lock notification forever:
+        // a missed unlock notification must not permanently stop protection.
+        if(Native.WTSGetActiveConsoleSessionId()!=(uint)Process.GetCurrentProcess().SessionId) return false;
         IntPtr buffer;int bytes;
         if(!Native.WTSQuerySessionInformation(IntPtr.Zero,-1,16,out buffer,out bytes)) return false;
         try {if(bytes<2 || Marshal.ReadInt16(buffer)!=0) return false;}finally {Native.WTSFreeMemory(buffer);}
@@ -167,17 +210,17 @@ internal sealed class LayoutProtection : IDisposable
     }
     internal void Session(int reason)
     {
-        if(reason==7) locked=true;
-        if(reason==8) locked=false;
+        LayoutSnapshot.CancelRestore();
+        Program.Log("Layout session reason="+reason);
         if(reason==2 || reason==3 || reason==4) gate.Freeze(snapshot!=null);
         else gate.Freeze(false);
         candidate=null;Poll();
     }
-    internal void DisplayChanged() {gate.Freeze(snapshot!=null);candidate=null;Poll();}
+    internal void DisplayChanged() {LayoutSnapshot.CancelRestore();gate.Freeze(snapshot!=null);candidate=null;Poll();}
     internal void SetActive(bool value) {active=value;gate.Freeze(false);candidate=null;if(started) Poll();}
     internal void SetEnabled(bool value)
     {
-        Directory.CreateDirectory(Program.DataDir);File.WriteAllText(setting,value.ToString());Enabled=value;gate.Freeze(false);candidate=null;if(started) Poll();
+        Directory.CreateDirectory(dataDirectory);File.WriteAllText(setting,value.ToString());Enabled=value;if(value) gate.Freeze(false);candidate=null;if(started) Poll();
     }
     void Update(string value)
     {
@@ -185,33 +228,45 @@ internal sealed class LayoutProtection : IDisposable
     }
     void SaveSnapshot(LayoutSnapshot value)
     {
-        Directory.CreateDirectory(Program.DataDir);value.Generation=checked((snapshot==null?0:snapshot.Generation)+1);
-        value.Write(Path.Combine(Program.DataDir,value.Generation%2==1?"layout-a.dat":"layout-b.dat"));snapshot=value;
+        Directory.CreateDirectory(dataDirectory);value.Generation=checked((snapshot==null?0:snapshot.Generation)+1);
+        value.Write(Path.Combine(dataDirectory,value.Generation%2==1?"layout-a.dat":"layout-b.dat"));snapshot=value;
     }
     internal void SaveNow()
     {
         if(!CanSave) throw new InvalidOperationException("请回到本机并等待屏幕稳定后再保存。");
-        SaveSnapshot(LayoutSnapshot.Capture());candidate=null;gate.Restored();Poll();Update("已保存布局 · "+snapshot.Saved.ToString("HH:mm:ss"));
+        var value=LayoutSnapshot.Capture(onlyPid);value.Generation=checked((manualSnapshot==null?0:manualSnapshot.Generation)+1);
+        Directory.CreateDirectory(dataDirectory);value.Write(Path.Combine(dataDirectory,value.Generation%2==1?"layout-manual-a.dat":"layout-manual-b.dat"));manualSnapshot=value;
+        SaveSnapshot(LayoutSnapshot.Capture(onlyPid));candidate=null;gate.Restored();Poll();Update("已手动保存 · "+manualSnapshot.Saved.ToString("HH:mm:ss"));
+        Program.Log("Layout manual saved windows="+manualSnapshot.Windows.Count);
     }
     internal void RestoreNow()
     {
         if(!CanRestore) throw new InvalidOperationException("请回到本机，等待原屏幕布局（分辨率、位置及任务栏工作区）恢复后再试。");
-        int count=snapshot.Restore();gate.Restored();candidate=null;lastCapture=clock.ElapsedMilliseconds+5000;
-        Update("已发送还原请求："+count+" 个窗口");Program.Log("Layout restored windows="+count);
+        Restore(manualSnapshot,"manual");
     }
-    void Poll()
+    internal void RestoreAutomatic()
+    {
+        if(!CanRestoreAutomatic) throw new InvalidOperationException("最近自动布局与当前屏幕不匹配，请等待原屏幕布局恢复。");
+        Restore(snapshot,"automatic");
+    }
+    void Restore(LayoutSnapshot value,string source)
+    {
+        int count=value.Restore(onlyPid);gate.Restored();candidate=null;lastCapture=Now+5000;
+        Update("已发送还原请求："+count+" 个窗口");Program.Log("Layout restored source="+source+" windows="+count+" recorded="+value.Windows.Count);
+    }
+    internal void Poll()
     {
         if(disposed) return;
         try {
-            bool local=Local();int action=gate.Tick(clock.ElapsedMilliseconds,local,LayoutSnapshot.CurrentTopology(),snapshot==null?null:snapshot.Topology);
+            bool local=Local();int action=gate.Tick(Now,local,LayoutSnapshot.CurrentTopology(),snapshot==null?null:snapshot.Topology);
             if(!Enabled || !active) {candidate=null;Update(!Enabled?"自动恢复已关闭":"应用已停用");return;}
             if(action==0) {candidate=null;Update(!local?"远程／锁定期间保护布局":gate.Stable?"等待原屏幕布局恢复":"等待本地屏幕稳定");return;}
-            if(action==2) {RestoreNow();return;}
+            if(action==2) {RestoreAutomatic();return;}
             // Retain a delayed sample, so late display/session notifications cannot commit
             // the positions Windows already collapsed during a connection transition.
-            long now=clock.ElapsedMilliseconds;
+            long now=Now;
             if(candidate!=null && now-candidateSince>=4000) {SaveSnapshot(candidate);candidate=null;}
-            if(candidate==null && now-lastCapture>=2000) {candidate=LayoutSnapshot.Capture();candidateSince=now;lastCapture=now;}
+            if(candidate==null && now-lastCapture>=2000) {candidate=LayoutSnapshot.Capture(onlyPid);candidateSince=now;lastCapture=now;}
             Update(snapshot==null?"正在记录本地布局":"已保护布局 · "+snapshot.Saved.ToString("HH:mm:ss"));
         }catch(Exception e) {candidate=null;gate.Freeze(false);Update("布局保护暂时失败（详见本地日志）");Program.Log("Layout protection: "+e.Message);}
     }
