@@ -10,7 +10,7 @@ internal static class Program
     internal const string Name = "选屏显示桌面";
     internal const string RunName = "ChoiceMinimizeWindow";
     internal static readonly string DataDir = IsTest ? Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"..","test-results","profile")) : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),RunName);
-    static bool IsTest {get {string[] args=Environment.GetCommandLineArgs();return Array.IndexOf(args,"--self-test")>=0 || Array.IndexOf(args,"--logic-test")>=0;}}
+    static bool IsTest {get {string[] args=Environment.GetCommandLineArgs();return Array.IndexOf(args,"--self-test")>=0 || Array.IndexOf(args,"--logic-test")>=0 || Array.IndexOf(args,"--layout-test")>=0;}}
     internal static EventWaitHandle Signal;
     internal static EventWaitHandle QuitSignal;
     internal static void Log(string text) { try { Directory.CreateDirectory(DataDir); string path=Path.Combine(DataDir,"app.log"); if(File.Exists(path) && new FileInfo(path).Length>262144) File.WriteAllText(path,""); File.AppendAllText(path,DateTime.Now.ToString("s")+" "+text+Environment.NewLine); } catch {} }
@@ -21,6 +21,7 @@ internal static class Program
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         if(Array.IndexOf(args,"--self-test")>=0) { SelfTest.Run(); return; }
         if(Array.IndexOf(args,"--logic-test")>=0) { SelfTest.RunLogic(); return; }
+        if(Array.IndexOf(args,"--layout-test")>=0) { SelfTest.Run(true); return; }
         if(args.Length==2 && args[0]=="--fixture") { SelfTest.Fixture(args[1]); return; }
         bool takeOver=Array.IndexOf(args,"--take-over")>=0;
         if(takeOver) {try {using(var quit=EventWaitHandle.OpenExisting(@"Local\ChoiceMinimizeWindow.Quit")) quit.Set();}catch(WaitHandleCannotBeOpenedException) {}}
@@ -88,11 +89,12 @@ internal sealed class MainForm : Form
         try {string path=Path.Combine(Program.DataDir,"interaction.txt");if(File.Exists(path)) {string[] lines=File.ReadAllLines(path);int ms;if(lines.Length>0 && int.TryParse(lines[0],out ms) && ms>=500 && ms<=5000) holdMilliseconds=ms;if(lines.Length>1 && Array.IndexOf(SwitchKeys,lines[1])>=0) switchHotkey=lines[1];}}catch(Exception e){Program.Log(e.Message);}
         try {string path=Path.Combine(Program.DataDir,"routing.txt");bool value;if(File.Exists(path) && bool.TryParse(File.ReadAllText(path).Trim(),out value)) routeEnabled=value;}catch(Exception e){Program.Log(e.Message);}
         shortcuts.ActionRequested+=delegate(int kind,IntPtr focus,int direction,bool held) {QueueAction(delegate {RunShortcut(kind,focus,direction,held);});};
-        shortcuts.UserInteraction+=delegate {QueueAction(delegate {
+        shortcuts.UserInteraction+=delegate {long observed=System.Diagnostics.Stopwatch.GetTimestamp();QueueAction(delegate {
+            LayoutSnapshot.CancelRestore(observed);
             desktopTarget.Reset();IntPtr focus=Native.GetForegroundWindow();
             currentScreen.Keyboard(WindowManager.Eligible(focus,true));
         });};
-        shortcuts.MouseInteraction+=delegate(Point point) {QueueAction(delegate {launchRouter.Cancel();SelectCurrentScreen(Screen.FromPoint(point));});};
+        shortcuts.MouseInteraction+=delegate(Point point) {long observed=System.Diagnostics.Stopwatch.GetTimestamp();QueueAction(delegate {LayoutSnapshot.CancelRestore(observed);launchRouter.Cancel();SelectCurrentScreen(Screen.FromPoint(point));});};
         shortcuts.LaunchClick+=delegate(Point point,IntPtr focus) {QueueAction(delegate {launchRouter.Arm(Screen.FromPoint(point),focus);});};
         shortcuts.RoutingKey+=delegate(IntPtr focus,bool launch) {QueueAction(delegate {
             uint pid;Native.GetWindowThreadProcessId(focus,out pid);
@@ -167,9 +169,11 @@ internal sealed class MainForm : Form
         automatic.Click+=delegate {try {layoutProtection.SetEnabled(!layoutProtection.Enabled);}catch(Exception e) {MessageBox.Show(e.Message,Program.Name);}};
         layout.DropDownItems.Add(automatic);
         layout.DropDownItems.Add(new ToolStripMenuItem(layoutProtection.Status) {Enabled=false});
+        layout.DropDownItems.Add(new ToolStripMenuItem(layoutProtection.ManualStatus) {Enabled=false});
         layout.DropDownItems.Add(new ToolStripSeparator());
         layout.DropDownItems.Add("保存当前布局",null,delegate {try {layoutProtection.SaveNow();}catch(Exception e) {MessageBox.Show(e.Message,Program.Name);}}).Enabled=layoutProtection.CanSave;
-        layout.DropDownItems.Add("立即恢复布局",null,delegate {try {layoutProtection.RestoreNow();}catch(Exception e) {MessageBox.Show(e.Message,Program.Name);}}).Enabled=layoutProtection.CanRestore;
+        layout.DropDownItems.Add("恢复手动保存的布局",null,delegate {try {layoutProtection.RestoreNow();}catch(Exception e) {MessageBox.Show(e.Message,Program.Name);}}).Enabled=layoutProtection.CanRestore;
+        layout.DropDownItems.Add("恢复最近自动布局",null,delegate {try {layoutProtection.RestoreAutomatic();}catch(Exception e) {MessageBox.Show(e.Message,Program.Name);}}).Enabled=layoutProtection.CanRestoreAutomatic;
         menu.Items.Add(layout);
         menu.Items.Add("切换应用：选择屏幕",null,delegate {OpenSelector(true,false);}).Enabled=applicationEnabled;
         Screen[] screens=WindowManager.Screens();

@@ -4,6 +4,61 @@ using System.Runtime.InteropServices;
 
 internal static class LayoutProtectionTests
 {
+    internal static void Service(uint pid,Action pump,Action<bool,string> check)
+    {
+        if(pid==0) throw new ArgumentException("Fixture PID is mandatory");
+        string directory=Path.Combine(Program.DataDir,"service-"+Guid.NewGuid().ToString("N"));
+        var original=LayoutSnapshot.Capture(pid);long now=0;bool local=true;
+        using(var owner=new System.Windows.Forms.Form())
+        using(var service=new LayoutProtection(pid,directory,()=>local,()=>now)) {
+            try {
+                service.Start(owner.Handle);now=5000;service.Poll();
+                check(service.CanSave,"service becomes ready on stable local console");service.SaveNow();
+                foreach(var entry in original.Windows) {
+                    IntPtr h=new IntPtr(entry.Handle);Native.ShowWindowAsync(h,1);pump();
+                    var area=WindowManager.Screens()[WindowManager.Screens().Length-1].WorkingArea;
+                    Native.SetWindowPos(h,IntPtr.Zero,area.Left+180,area.Top+180,450,290,0x14);
+                }
+                pump();now=7000;service.Poll();now=12000;service.Poll();
+                service.RestoreNow();pump();
+                foreach(var entry in original.Windows) {
+                    var p=new Native.Placement {Length=Marshal.SizeOf(typeof(Native.Placement))};Native.GetWindowPlacement(new IntPtr(entry.Handle),ref p);
+                    var a=entry.Placement.Normal;var b=p.Normal;
+                    check(p.Show==entry.Placement.Show && Math.Abs(a.Left-b.Left)<=2 && Math.Abs(a.Top-b.Top)<=2 && Math.Abs(a.Right-b.Right)<=2 && Math.Abs(a.Bottom-b.Bottom)<=2,"manual save survives background capture after windows are scrambled");
+                }
+                var first=original.Windows[0];var area2=WindowManager.Screens()[0].WorkingArea;
+                Native.ShowWindowAsync(new IntPtr(first.Handle),1);pump();Native.SetWindowPos(new IntPtr(first.Handle),IntPtr.Zero,area2.Left+230,area2.Top+210,390,260,0x14);pump();
+                var remoteBaseline=LayoutSnapshot.Capture(pid);now=20000;service.Poll();now=25000;service.Poll();
+                long generation=LayoutSnapshot.LoadLatest(directory).Generation;
+                local=false;service.Session(3);
+                foreach(var entry in original.Windows) {Native.ShowWindowAsync(new IntPtr(entry.Handle),1);Native.SetWindowPos(new IntPtr(entry.Handle),IntPtr.Zero,area2.Left+50,area2.Top+50,300,200,0x14);}
+                pump();now=40000;service.Poll();
+                check(LayoutSnapshot.LoadLatest(directory).Generation==generation,"remote polling never overwrites the automatic baseline");
+                check(!service.CanRestore,"manual restoration unavailable while remote");
+                local=true;now=41000;service.Session(1);now=46000;service.Poll();pump();
+                foreach(var entry in remoteBaseline.Windows) {
+                    var p=new Native.Placement {Length=Marshal.SizeOf(typeof(Native.Placement))};Native.GetWindowPlacement(new IntPtr(entry.Handle),ref p);var a=entry.Placement.Normal;var b=p.Normal;
+                    check(p.Show==entry.Placement.Show && Math.Abs(a.Left-b.Left)<=2 && Math.Abs(a.Top-b.Top)<=2,"return to local session restores automatic baseline rather than older manual record");
+                }
+            }finally {original.Restore(pid);pump();}
+        }
+        now=0;
+        using(var owner=new System.Windows.Forms.Form())
+        using(var restarted=new LayoutProtection(pid,directory,()=>true,()=>now)) {
+            try {
+                restarted.Start(owner.Handle);now=5000;restarted.Poll();
+                check(restarted.CanRestore,"manual baseline survives service restart");
+                var first=original.Windows[0];Native.ShowWindowAsync(new IntPtr(first.Handle),1);pump();var area=WindowManager.Screens()[0].WorkingArea;
+                Native.SetWindowPos(new IntPtr(first.Handle),IntPtr.Zero,area.Left+270,area.Top+240,370,230,0x14);pump();
+                restarted.RestoreNow();pump();
+                var p=new Native.Placement {Length=Marshal.SizeOf(typeof(Native.Placement))};Native.GetWindowPlacement(new IntPtr(first.Handle),ref p);
+                check(p.Normal.Left==first.Placement.Normal.Left && p.Normal.Top==first.Placement.Normal.Top,"manual restore after restart uses saved layout rather than current positions");
+                restarted.SaveNow();check(LayoutSnapshot.LoadLatest(directory,"layout-manual").Generation==2,"only explicit manual save advances the pinned record");
+                restarted.SetEnabled(false);check(restarted.CanRestore,"manual restore remains available with automatic protection off");
+                restarted.Session(7);now=11000;restarted.Poll();check(restarted.CanSave,"current interactive desktop recovers after a missing unlock notification");
+            }finally {original.Restore(pid);pump();}
+        }
+    }
     internal static void Logic(Action<bool,string> check)
     {
         var gate=new LayoutGate();
@@ -69,6 +124,19 @@ internal static class LayoutProtectionTests
             check(p.Show==e.Placement.Show,"layout restores normal/maximized/minimized state");
             var before=e.Placement.Normal;var after=p.Normal;
             check(Math.Abs(before.Left-after.Left)<=2 && Math.Abs(before.Top-after.Top)<=2 && Math.Abs(before.Right-after.Right)<=2 && Math.Abs(before.Bottom-after.Bottom)<=2,"layout restores original normal rectangle across monitors");
+        }
+        var normal=snapshot.Windows.Find(e=>e.Placement.Show==1);
+        if(normal!=null) {
+            IntPtr h=new IntPtr(normal.Handle);int desiredWidth=normal.Placement.Normal.Right-normal.Placement.Normal.Left;
+            using(var dpiResize=new System.Windows.Forms.Timer {Interval=100}) {
+                dpiResize.Tick+=delegate {dpiResize.Stop();Native.SetWindowPos(h,IntPtr.Zero,0,0,desiredWidth*2/3,150,0x4016);};
+                long queuedInteraction=System.Diagnostics.Stopwatch.GetTimestamp();snapshot.Restore(fixturePid);LayoutSnapshot.CancelRestore(queuedInteraction);dpiResize.Start();pump();
+            }
+            var actual=new Native.Placement {Length=Marshal.SizeOf(typeof(Native.Placement))};Native.GetWindowPlacement(h,ref actual);
+            check(actual.Normal.Right-actual.Normal.Left==desiredWidth,"late DPI-style resize after placement is repaired to saved physical size");
+            snapshot.Restore(fixturePid);LayoutSnapshot.CancelRestore();Native.SetWindowPos(h,IntPtr.Zero,0,0,desiredWidth*2/3,150,0x4016);pump();Native.GetWindowPlacement(h,ref actual);
+            check(actual.Normal.Right-actual.Normal.Left==desiredWidth*2/3,"user cancellation prevents delayed repair from overriding a new resize");
+            snapshot.Restore(fixturePid);pump();
         }
         var first=snapshot.Windows[0];first.Cookie++;check(snapshot.Restore(fixturePid)==snapshot.Windows.Count-1,"window identity mismatch skipped");first.Cookie--;
         first.Started++;check(snapshot.Restore(fixturePid)==snapshot.Windows.Count-1,"process identity mismatch skipped");first.Started--;
